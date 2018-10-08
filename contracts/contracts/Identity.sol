@@ -9,12 +9,14 @@ import "./contracts/erc/ERC20.sol";
 
 interface GovernmentInterface {
     function register(bytes32 _identityHash, address _pid, bytes _encryptedInfo) public;
-    function update(bytes32 _identityHash, address _prePid, address _newPid, bytes _encryptedInfo) public;
+    function recover(bytes32 _identityHash, address _newPid) public;
+    function update(address _user, string _key, bytes _encryptedInfo) public;
     function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) public;
     function fetchGrant(bytes32 _idx) public view returns(bytes32);
 
     event Registered(address addr, uint time);
-    event Updated(address prePid, address newPid, uint time);
+    event Recovered(address prePid, address newPid, uint time);
+    event Updated(address pid, string key, uint time);
     event GrantedTo(bytes32 indexed idx, address from, address to, uint expiration, uint time);
 }
 
@@ -22,7 +24,7 @@ contract GovernmentImp {
 
     struct PersonalProfile {
         bytes32 UID;
-        bytes info;
+        mapping(string => bytes) mapInfos;
     }
     mapping(address => PersonalProfile) public personalProfile;
     mapping(bytes32 => address) internal uidMap2Pid;
@@ -41,21 +43,29 @@ contract GovernmentImp {
         
         PersonalProfile storage p = personalProfile[_pid];
         p.UID = _identityHash;
-        p.info = _encryptedInfo;
+        p.mapInfos["id"] = _encryptedInfo;
         uidMap2Pid[_identityHash] = _pid;
     }
 
-    function doUpdate(bytes32 _identityHash, address _newPid, bytes _encryptedInfo)  internal {
+    // update a new address in case that users lose their key.
+    function doRecover(bytes32 _identityHash, address _newPid)  internal {
         require(uidMap2Pid[_identityHash]!=0x0, "user doesn't exist");
-        require(personalProfile[_newPid].UID!=0x0, "new addr existed");
-
-        PersonalProfile storage p = personalProfile[uidMap2Pid[_identityHash]];
-        // update a new address in case that users lose their key.
-        if(_newPid != address(0x0))
-            p = personalProfile[_newPid];
-        p.UID = _identityHash;
-        p.info = _encryptedInfo;
+        require(_newPid != address(0x0), "new pid is nil");
+        require(personalProfile[_newPid].UID==0x0, "new addr existed");
+        
+        address oldAddr = uidMap2Pid[_identityHash];
+        PersonalProfile storage p = personalProfile[oldAddr];
+        personalProfile[_newPid] = p;
         uidMap2Pid[_identityHash] = _newPid;
+
+        delete personalProfile[oldAddr];
+    }
+
+    function doUpdate(address _user, string _key, bytes _encryptedInfo) internal {
+        require(_user!=0x0, "arg user is nil");
+
+        PersonalProfile storage p = personalProfile[_user];
+        p.mapInfos[_key] = _encryptedInfo;
     }
 
     function doGrantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) internal returns(bytes32) {
@@ -100,10 +110,15 @@ contract Government is GovernmentImp, GovernmentInterface, Ownable {
         emit Registered(_pid, now);
     }
 
-    function update(bytes32 _identityHash, address _newPid, bytes _encryptedInfo) public onlyOwner {
+    function recover(bytes32 _identityHash, address _newPid) public onlyOwner {
         address orgPid = uidMap2Pid[_identityHash];
-        super.doUpdate(_identityHash, _newPid, _encryptedInfo);
-        emit Updated(orgPid, _newPid, now);
+        super.doRecover(_identityHash, _newPid);
+        emit Recovered(orgPid, _newPid, now);
+    }
+
+    function update(address _user, string _key, bytes _encryptedInfo) public onlyOwner {
+        super.doUpdate(_user, _key, _encryptedInfo);
+        emit Updated(_user, _key, now);
     }
 
     function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) public onlyProfileOwner(msg.sender) {
@@ -159,11 +174,18 @@ contract GovernmentWithToken is Government, ERC165MappingImp, TokensRecipientInt
         require(erc20.transfer(_pid, REG_TOKEN_INCENTIVE), "transfer failed");
     }
 
-    function update(bytes32 _identityHash, address _newPid, bytes _encryptedInfo, bytes32 _receiptId) public {
+    function recover(bytes32 _identityHash, address _newPid, bytes32 _receiptId) public {
         require(tokenReceipt[_receiptId].to == address(this), "Haven't got tokens");
         require(tokenReceipt[_receiptId].amount >= UPDATE_TOKEN_EXPENSE, "Not enough tokens");
         delete tokenReceipt[_receiptId];
-        super.update(_identityHash, _newPid, _encryptedInfo);
+        super.recover(_identityHash, _newPid);
+    }
+
+    function update(address _user, string _key, bytes _encryptedInfo, bytes32 _receiptId) public {
+        require(tokenReceipt[_receiptId].to == address(this), "Haven't got tokens");
+        require(tokenReceipt[_receiptId].amount >= UPDATE_TOKEN_EXPENSE, "Not enough tokens");
+        delete tokenReceipt[_receiptId];
+        super.update(_user, _key, _encryptedInfo);
     }
 
     function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey, bytes32 _receiptId) public {
