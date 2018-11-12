@@ -1,213 +1,77 @@
 pragma solidity ^0.4.24;
 
-import "./contracts/ERC165Query.sol";
-import "./contracts/ERC165MappingImp.sol";
+import "./IdentityImp.sol";
 import "./contracts/Ownable.sol";
-import "./contracts/TokensRecipientInterface.sol";
-import "./contracts/erc/ERC20.sol";
+import "./DelegationCall.sol";
 
 
-interface GovernmentInterface {
-    function register(bytes32 _identityHash, address _pid, bytes _encryptedInfo) public;
-    function recover(bytes32 _identityHash, address _newPid) public;
-    function update(address _user, string _key, bytes _encryptedInfo) public;
-    function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) public;
-    function fetchGrant(bytes32 _idx) public view returns(bytes32);
-
-    event Registered(address addr, uint time);
-    event Recovered(address prePid, address newPid, uint time);
-    event Updated(address pid, string key, uint time);
-    event GrantedTo(bytes32 indexed idx, address from, address to, uint expiration, uint time);
-}
-
-contract GovernmentImp {
-
-    struct PersonalProfile {
-        bytes32 UID;
-        mapping(string => bytes) mapInfos;
-    }
-    mapping(address => PersonalProfile) public personalProfile;
-    mapping(bytes32 => address) internal uidMap2Pid;
-
-    struct GrantedData {
-        address grantor;
-        address grantee;
-        bytes32 secret;
-        uint expiration;
-    }
-    mapping(bytes32 => GrantedData) public grantedRecords;
-
-    function doRegister(bytes32 _identityHash, address _pid, bytes _encryptedInfo)  internal {
-        require(uidMap2Pid[_identityHash]==0x0, "Already registered");
-        require(personalProfile[_pid].UID==0x0, "user addr registered");
-        
-        PersonalProfile storage p = personalProfile[_pid];
-        p.UID = _identityHash;
-        p.mapInfos["id"] = _encryptedInfo;
-        uidMap2Pid[_identityHash] = _pid;
-    }
-
-    // update a new address in case that users lose their key.
-    function doRecover(bytes32 _identityHash, address _newPid)  internal {
-        require(uidMap2Pid[_identityHash]!=0x0, "user doesn't exist");
-        require(_newPid != address(0x0), "new pid is nil");
-        require(personalProfile[_newPid].UID==0x0, "new addr existed");
-        
-        address oldAddr = uidMap2Pid[_identityHash];
-        PersonalProfile storage p = personalProfile[oldAddr];
-        personalProfile[_newPid] = p;
-        uidMap2Pid[_identityHash] = _newPid;
-
-        delete personalProfile[oldAddr];
-    }
-
-    function doUpdate(address _user, string _key, bytes _encryptedInfo) internal {
-        require(_user!=0x0, "arg user is nil");
-
-        PersonalProfile storage p = personalProfile[_user];
-        p.mapInfos[_key] = _encryptedInfo;
-    }
-
-    function doGrantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) internal returns(bytes32) {
-        require(personalProfile[msg.sender].UID.length != 0, "<from> user doesn't exist");
-        require(personalProfile[_to].UID.length != 0, "<to> user doesn't exist");
-
-        bytes32 idx = keccak256(abi.encodePacked(msg.sender, _to, _expiration, _encryptedRandomKey));
-        GrantedData storage p = grantedRecords[idx];
-        p.grantor = msg.sender;
-        p.grantee = _to;
-        p.expiration = _expiration;
-        p.secret = _encryptedRandomKey;
-        return idx;
-    }
-
-    function doFetchGrant(bytes32 _idx) internal view returns(bytes32) {
-        require(now < grantedRecords[_idx].expiration, "expired");
-        return grantedRecords[_idx].secret;
-    }
-
-    function getGrantor(bytes32 _idx) view internal returns(address) {
-        return grantedRecords[_idx].grantor;
-    }
-}
-
-contract Government is GovernmentImp, GovernmentInterface, Ownable {
-
-    constructor() public {
-    }
+contract Identity is IdentityImp, IdentityInterface, DelegationCall, Ownable {
 
     modifier onlyProfileOwner(address addr)  {
         require(addr == msg.sender, "Not profile owner");
         _;
     }
     modifier onlyGrantee(bytes32 idx) {
-        require(grantedRecords[idx].grantee==msg.sender, "Not grantee");
+        require(getGrantee(idx)==msg.sender, "Not grantee");
         _;
     }
 
-    function register(bytes32 _identityHash, address _pid, bytes _encryptedInfo) public onlyOwner {
+
+    constructor() public {
+    }
+
+    function register(bytes32 _identityHash, address _pid, bytes _encryptedInfo) 
+    public 
+    onlyOwner {
         super.doRegister(_identityHash, _pid, _encryptedInfo);
         emit Registered(_pid, now);
     }
 
-    function recover(bytes32 _identityHash, address _newPid) public onlyOwner {
+    // TODO: CHECK SECURITY: it supposes only identity owner knows _identityHash
+    function recover(bytes32 _identityHash) 
+    public 
+    onlyProfileOwner(msg.sender) {
         address orgPid = uidMap2Pid[_identityHash];
-        super.doRecover(_identityHash, _newPid);
-        emit Recovered(orgPid, _newPid, now);
+        super.doRecover(_identityHash, msg.sender);
+        emit Recovered(orgPid, msg.sender, now);
     }
 
-    function update(address _user, string _key, bytes _encryptedInfo) public onlyOwner {
-        super.doUpdate(_user, _key, _encryptedInfo);
-        emit Updated(_user, _key, now);
+    function update(string _key, bytes _encryptedInfo) 
+    public 
+    onlyProfileOwner(msg.sender) {
+        super.doUpdate(msg.sender, _key, _encryptedInfo);
+        emit Updated(msg.sender, _key, now);
     }
 
-    function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) public onlyProfileOwner(msg.sender) {
+    function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey) 
+    public 
+    onlyProfileOwner(msg.sender) {
         bytes32 idx = super.doGrantTo(_to, _expiration, _encryptedRandomKey);
         emit GrantedTo(idx, msg.sender, _to, _expiration, now);
     }
 
-    function fetchGrant(bytes32 _idx) public view /*onlyGrantee(_idx)*/ returns(bytes32) {
-        return super.doFetchGrant(_idx);
+    function fetchGrant(bytes32 _idx) 
+    public 
+    onlyGrantee(_idx) {
+        emit GrantFeteched(super.doFetchGrant(_idx));
+    }
+
+    function approve(uint256 _id, bool _approve)
+    public
+    onlyProfileOwner(msg.sender) 
+    returns (bool success) {
+        return super.doApprove(_id, _approve);
+    }
+
+    function execute(address _to, uint256 _value, bytes _data)
+    public
+    onlyProfileOwner(msg.sender) 
+    returns (uint256 executionId) {
+        return super.doExecute(_to, _value, _data);
+    }
+
+
+    function() public {
+        revert("fallback is not allowed");
     }
 }
-
-contract GovernmentWithToken is Government, ERC165MappingImp, TokensRecipientInterface {
-    
-    event TokenReceipt(bytes32 indexed receiptId, address to, uint amount, uint time);
-    event CashOut(address receiver, uint amount, uint time);
-    
-
-    uint serial = 0;
-    ERC20 erc20;
-    uint8 private constant ID_MASK = 0xF;
-    uint private constant BYTES32_MASK = 0xFFFFFFFF;
-    uint private constant TOKEN_DECIMAL = 10**18;
-    uint private constant REG_TOKEN_INCENTIVE = 1000 * TOKEN_DECIMAL;
-    uint private constant UPDATE_TOKEN_EXPENSE = 10 * TOKEN_DECIMAL;
-    uint private constant GRANT_TOKEN_EXPENSE = 10 * TOKEN_DECIMAL;
-    uint private constant FETCH_TOKEN_EXPENSE = 50 * TOKEN_DECIMAL;
-
-    struct ReceiptContent {
-        address to;
-        uint amount;
-        bytes32 data;
-    }
-    mapping(bytes32 => ReceiptContent) private tokenReceipt;
-    
-
-    constructor (address token) public {
-        erc20 = ERC20(token);
-    }
-
-    function tokensReceived(address _from, address _to, uint _amount, bytes32 _data) external returns (bool) {
-        bytes32 idx = keccak256(abi.encodePacked(serial++, _from, gasleft(), now));
-        ReceiptContent storage r = tokenReceipt[idx];
-        r.to = _to;
-        r.amount = _amount;
-        r.data = _data;
-        // TODO: support this.call(_data), _data is type of bytes
-        emit TokenReceipt(idx, _to, _amount, now);
-    }
-
-    function register(bytes32 _identityHash, address _pid, bytes _encryptedInfo) public {
-        super.register(_identityHash, _pid, _encryptedInfo);
-        require(erc20.transfer(_pid, REG_TOKEN_INCENTIVE), "transfer failed");
-    }
-
-    function recover(bytes32 _identityHash, address _newPid, bytes32 _receiptId) public {
-        require(tokenReceipt[_receiptId].to == address(this), "Haven't got tokens");
-        require(tokenReceipt[_receiptId].amount >= UPDATE_TOKEN_EXPENSE, "Not enough tokens");
-        delete tokenReceipt[_receiptId];
-        super.recover(_identityHash, _newPid);
-    }
-
-    function update(address _user, string _key, bytes _encryptedInfo, bytes32 _receiptId) public {
-        require(tokenReceipt[_receiptId].to == address(this), "Haven't got tokens");
-        require(tokenReceipt[_receiptId].amount >= UPDATE_TOKEN_EXPENSE, "Not enough tokens");
-        delete tokenReceipt[_receiptId];
-        super.update(_user, _key, _encryptedInfo);
-    }
-
-    function grantTo(address _to, uint _expiration, bytes32 _encryptedRandomKey, bytes32 _receiptId) public {
-        require(tokenReceipt[_receiptId].to == address(this), "Haven't got tokens");
-        require(tokenReceipt[_receiptId].amount >= GRANT_TOKEN_EXPENSE, "Not enough tokens");
-        delete tokenReceipt[_receiptId];
-        super.grantTo(_to, _expiration, _encryptedRandomKey);
-    }
-
-    function fetchGrant(bytes32 _idx, bytes32 _receiptId) public view returns(bytes32) {
-        require(tokenReceipt[_receiptId].to == super.getGrantor(_idx), "Haven't got tokens");
-        require(tokenReceipt[_receiptId].amount >= FETCH_TOKEN_EXPENSE, "Not enough tokens");
-
-        // TODO: transfer tokens to data owner and fetch count limit?
-        return super.fetchGrant(_idx);
-    }
-
-    function cashOut() public onlyOwner {
-        uint totalBalance = erc20.balanceOf(address(this));
-        erc20.transfer(owner, totalBalance);
-        emit CashOut(owner, totalBalance, now);
-    }
-
-}
-
