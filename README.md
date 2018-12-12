@@ -1,5 +1,7 @@
 # Digital Identiry
 
+`It's pending right now because NuCyper doesn't support Go version library. I'm working on this.`
+
 **This project is still developing and hasn’t tested yet.**
 
 This project provides digital identity function on blockchain. It also provides data exchange by token payment. This project includes smart contracts with identity and token payment functionalities and a golang library for data authorization. Data authorization use [NuCypher](https://www.nucypher.com/) for data re-encryption.
